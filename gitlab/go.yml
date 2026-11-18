@@ -1,0 +1,125 @@
+# The CI of a Go API made with infrapi-cli app init, as a GitLab CI include:
+# on a push or a merge request, lint, test and build; on a tag v<x.y.z>,
+# the release, GoReleaser reading the project's .goreleaser.yaml (archives,
+# deb and rpm packages, the image: whatever it has), its artifacts on the
+# project's release.
+#
+#   include:
+#     - remote: https://raw.githubusercontent.com/infrapi/ci/v1/gitlab/go.yml
+#       inputs:
+#         binary: compute
+#         docker: true
+#
+# CI/CD variables it reads, when set: GOPRIVATE_TOKEN (the private modules;
+# CI_JOB_TOKEN otherwise), REGISTRY_USERNAME and REGISTRY_PASSWORD (a
+# registry other than the project's). See README.md.
+spec:
+  inputs:
+    binary:
+      description: the binary, built from ./cmd/<binary>
+    go-image:
+      description: the image the checks run in
+      default: docker.io/library/golang:1.27
+    golangci-lint-version:
+      description: golangci-lint's version
+      default: v2.15.0
+    goprivate:
+      description: GOPRIVATE, the private modules' patterns (gitlab.example.com/*)
+      default: ""
+    docker:
+      description: the release builds the image too (dockers_v2), multi-platform, and pushes it to registry
+      type: boolean
+      default: false
+    registry:
+      description: the image's registry; the project's own when empty
+      default: ""
+    goreleaser-image:
+      description: GoReleaser's image
+      default: docker.io/goreleaser/goreleaser:latest
+---
+stages: [check, release]
+
+variables:
+  GOPRIVATE: $[[ inputs.goprivate ]]
+  GOPATH: $CI_PROJECT_DIR/.go
+  GOFLAGS: -mod=readonly
+
+# git fetches the private modules with the token: go asks no proxy for
+# GOPRIVATE's
+.go-private: &go-private
+  - |
+    for pattern in $(echo "$GOPRIVATE" | tr ',' ' '); do
+      host="${pattern%%/*}"
+      git config --global url."https://gitlab-ci-token:${GOPRIVATE_TOKEN:-$CI_JOB_TOKEN}@${host}/".insteadOf "https://${host}/"
+    done
+
+.go:
+  image: $[[ inputs.go-image ]]
+  stage: check
+  cache:
+    key: go-$CI_COMMIT_REF_SLUG
+    paths: [.go/pkg/mod/]
+  before_script:
+    - *go-private
+
+lint:
+  extends: .go
+  script:
+    - go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$[[ inputs.golangci-lint-version ]]
+    - go vet ./...
+    - $GOPATH/bin/golangci-lint run
+
+test:
+  extends: .go
+  script:
+    - go test -race ./...
+
+build:
+  extends: .go
+  script:
+    - CGO_ENABLED=0 go build -trimpath -o bin/$[[ inputs.binary ]] ./cmd/$[[ inputs.binary ]]
+  artifacts:
+    paths: [bin/]
+    expire_in: 1 week
+
+# GoReleaser publishes to the project's release with the job's token: the
+# project's .goreleaser.yaml has gitlab_urls with use_job_token.
+.release:
+  stage: release
+  image:
+    name: $[[ inputs.goreleaser-image ]]
+    entrypoint: [""]
+  variables:
+    GITLAB_TOKEN: $CI_JOB_TOKEN
+    GIT_DEPTH: 0
+  before_script:
+    - *go-private
+
+release:
+  extends: .release
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v/ && "$[[ inputs.docker ]]" != "true"
+  script:
+    - goreleaser release --clean --skip=docker
+
+# the image too, for linux/amd64 and linux/arm64, with buildx in docker:dind
+release-image:
+  extends: .release
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v/ && "$[[ inputs.docker ]]" == "true"
+  services:
+    - docker:dind
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+    REGISTRY: $[[ inputs.registry ]]
+  script:
+    - docker run --privileged --rm tonistiigi/binfmt --install arm64,amd64
+    - docker buildx create --use
+    - |
+      if [ -n "$REGISTRY" ]; then
+        echo "$REGISTRY_PASSWORD" | docker login -u "$REGISTRY_USERNAME" --password-stdin "$REGISTRY"
+      else
+        echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+      fi
+    - goreleaser release --clean

@@ -1,0 +1,149 @@
+# The CI of a Go API made with infrapi-cli app init, as a reusable
+# workflow: on a push or a pull request, lint, test and build; on a tag
+# v<x.y.z>, the release, GoReleaser reading the project's .goreleaser.yaml
+# (archives, deb and rpm packages, the image: whatever it has).
+#
+#   jobs:
+#     go:
+#       uses: infrapi/ci/.github/workflows/go.yml@v1
+#       permissions:
+#         contents: write   # the release
+#         packages: write   # the image, on ghcr.io
+#       with:
+#         binary: compute
+#         docker: true
+#       secrets: inherit
+#
+# See README.md for every input and secret.
+name: Go
+
+on:
+  workflow_call:
+    inputs:
+      binary:
+        description: the binary, built from ./cmd/<binary>
+        type: string
+        required: true
+      go-version-file:
+        description: the file setup-go reads Go's version from
+        type: string
+        default: go.mod
+      golangci-lint-version:
+        description: golangci-lint's version
+        type: string
+        default: v2.15.0
+      goprivate:
+        description: GOPRIVATE, the private modules' patterns (gitlab.example.com/*), fetched from their repository with the GOPRIVATE_TOKEN secret
+        type: string
+        default: ""
+      docker:
+        description: the release builds the image too (dockers_v2), multi-platform, and pushes it to registry
+        type: boolean
+        default: false
+      registry:
+        description: the image's registry, logged in to with REGISTRY_USERNAME and REGISTRY_PASSWORD, or this job's token for ghcr.io
+        type: string
+        default: ghcr.io
+      goreleaser-version:
+        description: GoReleaser's version
+        type: string
+        default: "~> v2"
+    secrets:
+      GOPRIVATE_TOKEN:
+        description: a token reading the private modules
+        required: false
+      REGISTRY_USERNAME:
+        description: the registry's user, when it is not ghcr.io
+        required: false
+      REGISTRY_PASSWORD:
+        description: the registry's password or token, when it is not ghcr.io
+        required: false
+
+env:
+  GOPRIVATE: ${{ inputs.goprivate }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+          cache: true
+
+      # git fetches the private modules with the token: go asks no proxy
+      # for GOPRIVATE's
+      - name: Private modules
+        if: inputs.goprivate != ''
+        env:
+          TOKEN: ${{ secrets.GOPRIVATE_TOKEN }}
+        run: |
+          for pattern in ${GOPRIVATE//,/ }; do
+            host="${pattern%%/*}"
+            git config --global url."https://x-access-token:${TOKEN}@${host}/".insteadOf "https://${host}/"
+          done
+
+      - name: Lint
+        run: |
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${{ inputs.golangci-lint-version }}
+          go vet ./...
+          golangci-lint run
+
+      - name: Test
+        run: go test -race ./...
+
+      - name: Build
+        run: CGO_ENABLED=0 go build -trimpath -o bin/${{ inputs.binary }} ./cmd/${{ inputs.binary }}
+
+  release:
+    needs: check
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+          cache: true
+
+      - name: Private modules
+        if: inputs.goprivate != ''
+        env:
+          TOKEN: ${{ secrets.GOPRIVATE_TOKEN }}
+        run: |
+          for pattern in ${GOPRIVATE//,/ }; do
+            host="${pattern%%/*}"
+            git config --global url."https://x-access-token:${TOKEN}@${host}/".insteadOf "https://${host}/"
+          done
+
+      # the image, for linux/amd64 and linux/arm64, with buildx
+      - uses: docker/setup-qemu-action@v3
+        if: inputs.docker
+
+      - uses: docker/setup-buildx-action@v3
+        if: inputs.docker
+
+      - uses: docker/login-action@v3
+        if: inputs.docker
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ secrets.REGISTRY_USERNAME || github.actor }}
+          password: ${{ secrets.REGISTRY_PASSWORD || secrets.GITHUB_TOKEN }}
+
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: ${{ inputs.goreleaser-version }}
+          args: release --clean ${{ !inputs.docker && '--skip=docker' || '' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
