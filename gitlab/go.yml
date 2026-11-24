@@ -1,5 +1,6 @@
-# The CI of a Go API made with infrapi-cli app init, as a GitLab CI include:
-# on a push or a merge request, lint, test and build; on a tag v<x.y.z>,
+# The CI of a Go project, such as an API made with infrapi-cli app init, as a
+# GitLab CI include: on a push or a merge request, the checks (gofmt, go vet,
+# golangci-lint, gosec, go test -race, the build); on a tag v<x.y.z>,
 # the release, GoReleaser reading the project's .goreleaser.yaml (archives,
 # deb and rpm packages, the image: whatever it has), its artifacts on the
 # project's release.
@@ -16,13 +17,24 @@
 spec:
   inputs:
     binary:
-      description: the binary, built from ./cmd/<binary>
+      description: the binary, built from main; none for a library
+      default: ""
+    main:
+      description: the binary's main package, ./cmd/<binary> when empty
+      default: ""
     go-image:
       description: the image the checks run in
       default: docker.io/library/golang:1.27
     golangci-lint-version:
       description: golangci-lint's version
       default: v2.15.0
+    gosec:
+      description: run gosec
+      type: boolean
+      default: true
+    gosec-version:
+      description: gosec's version
+      default: v2.30.0
     goprivate:
       description: GOPRIVATE, the private modules' patterns (gitlab.example.com/*)
       default: ""
@@ -62,12 +74,29 @@ variables:
   before_script:
     - *go-private
 
+format:
+  extends: .go
+  script:
+    - |
+      unformatted=$(gofmt -l .)
+      if [ -n "$unformatted" ]; then
+        echo "not gofmt'ed, run gofmt -w:"; echo "$unformatted"; gofmt -d .; exit 1
+      fi
+
 lint:
   extends: .go
   script:
     - go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$[[ inputs.golangci-lint-version ]]
     - go vet ./...
     - $GOPATH/bin/golangci-lint run
+
+security:
+  extends: .go
+  rules:
+    - if: '"$[[ inputs.gosec ]]" == "true"'
+  script:
+    - go install github.com/securego/gosec/v2/cmd/gosec@$[[ inputs.gosec-version ]]
+    - $GOPATH/bin/gosec -exclude-dir _local -quiet ./...
 
 test:
   extends: .go
@@ -76,8 +105,12 @@ test:
 
 build:
   extends: .go
+  rules:
+    - if: '"$[[ inputs.binary ]]" != ""'
+  variables:
+    MAIN: $[[ inputs.main ]]
   script:
-    - CGO_ENABLED=0 go build -trimpath -o bin/$[[ inputs.binary ]] ./cmd/$[[ inputs.binary ]]
+    - CGO_ENABLED=0 go build -trimpath -o bin/$[[ inputs.binary ]] "${MAIN:-./cmd/$[[ inputs.binary ]]}"
   artifacts:
     paths: [bin/]
     expire_in: 1 week

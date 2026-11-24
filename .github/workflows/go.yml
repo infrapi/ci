@@ -1,7 +1,16 @@
-# The CI of a Go API made with infrapi-cli app init, as a reusable
-# workflow: on a push or a pull request, lint, test and build; on a tag
-# v<x.y.z>, the release, GoReleaser reading the project's .goreleaser.yaml
-# (archives, deb and rpm packages, the image: whatever it has).
+# The CI of a Go project, as a reusable workflow: on a push or a pull
+# request, the checks (gofmt, go vet, golangci-lint, gosec, go test -race,
+# the build); then the release, GoReleaser reading the project's
+# .goreleaser.yaml (archives, deb and rpm packages, the image: whatever it
+# has), and, for InfraPI's own repositories, the portal told.
+#
+# The release comes, by `release`:
+#   - tag (the default): from a tag v<x.y.z> you push, as a project made with
+#     infrapi-cli app init does;
+#   - semantic: from a push to main, go-semantic-release making the version,
+#     its tag and the GitHub release from the conventional commits, then
+#     GoReleaser adding the files to it, in the same job;
+#   - none: no release, the checks only.
 #
 #   jobs:
 #     go:
@@ -21,9 +30,13 @@ on:
   workflow_call:
     inputs:
       binary:
-        description: the binary, built from ./cmd/<binary>
+        description: the binary, built from main; none for a library
         type: string
-        required: true
+        default: ""
+      main:
+        description: the binary's main package, ./cmd/<binary> when empty
+        type: string
+        default: ""
       go-version-file:
         description: the file setup-go reads Go's version from
         type: string
@@ -32,10 +45,26 @@ on:
         description: golangci-lint's version
         type: string
         default: v2.15.0
+      gosec:
+        description: run gosec
+        type: boolean
+        default: true
+      gosec-version:
+        description: gosec's version
+        type: string
+        default: v2.30.0
       goprivate:
         description: GOPRIVATE, the private modules' patterns (gitlab.example.com/*), fetched from their repository with the GOPRIVATE_TOKEN secret
         type: string
         default: ""
+      release:
+        description: "where the release comes from: tag (a tag v<x.y.z>), semantic (go-semantic-release on a push to main) or none"
+        type: string
+        default: tag
+      goreleaser:
+        description: the release runs GoReleaser (false for a library, whose release is its tag)
+        type: boolean
+        default: true
       docker:
         description: the release builds the image too (dockers_v2), multi-platform, and pushes it to registry
         type: boolean
@@ -48,6 +77,10 @@ on:
         description: GoReleaser's version
         type: string
         default: "~> v2"
+      notify-docs:
+        description: "InfraPI's repositories: tell infrapi/docs and infrapi/.github after a release, a push to main changing docs/, or a manual run"
+        type: boolean
+        default: false
     secrets:
       GOPRIVATE_TOKEN:
         description: a token reading the private modules
@@ -58,6 +91,13 @@ on:
       REGISTRY_PASSWORD:
         description: the registry's password or token, when it is not ghcr.io
         required: false
+      DOCS_APP_PRIVATE_KEY:
+        description: with notify-docs, the private key of the GitHub App that may dispatch to infrapi/docs and infrapi/.github
+        required: false
+    outputs:
+      version:
+        description: the version released by release semantic, empty when none
+        value: ${{ jobs.semantic-release.outputs.version }}
 
 env:
   GOPRIVATE: ${{ inputs.goprivate }}
@@ -87,21 +127,50 @@ jobs:
             git config --global url."https://x-access-token:${TOKEN}@${host}/".insteadOf "https://${host}/"
           done
 
+      # gofmt is Go's own, the version go-version-file names
+      - name: Format
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::not gofmt'ed, run gofmt -w:"
+            echo "$unformatted"
+            gofmt -d .
+            exit 1
+          fi
+
       - name: Lint
         run: |
           go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${{ inputs.golangci-lint-version }}
           go vet ./...
           golangci-lint run
 
+      - name: Security
+        if: inputs.gosec
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@${{ inputs.gosec-version }}
+          gosec -exclude-dir _local -quiet ./...
+
       - name: Test
         run: go test -race ./...
 
       - name: Build
-        run: CGO_ENABLED=0 go build -trimpath -o bin/${{ inputs.binary }} ./cmd/${{ inputs.binary }}
+        if: inputs.binary != ''
+        env:
+          MAIN: ${{ inputs.main || format('./cmd/{0}', inputs.binary) }}
+        run: CGO_ENABLED=0 go build -trimpath -o bin/${{ inputs.binary }} "$MAIN"
 
+      - name: Check the release configuration
+        if: inputs.release != 'none' && inputs.goreleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: ${{ inputs.goreleaser-version }}
+          args: check
+
+  # release: tag, on a tag v<x.y.z>
   release:
     needs: check
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: inputs.release == 'tag' && inputs.goreleaser && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -147,3 +216,131 @@ jobs:
           args: release --clean ${{ !inputs.docker && '--skip=docker' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # release: semantic, on a push to main
+  semantic-release:
+    needs: check
+    if: inputs.release == 'semantic' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    outputs:
+      version: ${{ steps.semrel.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: go-semantic-release/action@v1
+        id: semrel
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          allow-initial-development-versions: true
+
+      # go-semantic-release creates the tag with GITHUB_TOKEN, whose events
+      # start no other workflow (GitHub's anti-loop rule): a workflow on
+      # `push: tags` would never run, so GoReleaser runs here. The version
+      # is empty when the push releases nothing.
+      - name: Fetch the tag semantic-release just created
+        if: steps.semrel.outputs.version != '' && inputs.goreleaser
+        run: git fetch --tags --force origin
+
+      # semantic-release leaves its working files (.semrel/, the changelog)
+      # untracked: GoReleaser refuses a dirty tree
+      - name: Clean semantic-release's working files
+        if: steps.semrel.outputs.version != '' && inputs.goreleaser
+        run: git clean -ffdx
+
+      - uses: actions/setup-go@v7
+        if: steps.semrel.outputs.version != '' && inputs.goreleaser
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+          cache: true
+
+      - name: Private modules
+        if: steps.semrel.outputs.version != '' && inputs.goreleaser && inputs.goprivate != ''
+        env:
+          TOKEN: ${{ secrets.GOPRIVATE_TOKEN }}
+        run: |
+          for pattern in ${GOPRIVATE//,/ }; do
+            host="${pattern%%/*}"
+            git config --global url."https://x-access-token:${TOKEN}@${host}/".insteadOf "https://${host}/"
+          done
+
+      - uses: docker/setup-qemu-action@v3
+        if: steps.semrel.outputs.version != '' && inputs.goreleaser && inputs.docker
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.semrel.outputs.version != '' && inputs.goreleaser && inputs.docker
+
+      - uses: docker/login-action@v3
+        if: steps.semrel.outputs.version != '' && inputs.goreleaser && inputs.docker
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ secrets.REGISTRY_USERNAME || github.actor }}
+          password: ${{ secrets.REGISTRY_PASSWORD || secrets.GITHUB_TOKEN }}
+
+      # the project's .goreleaser.yaml appends to the release semantic-release
+      # made (release.mode: append) and writes no changelog of its own
+      - uses: goreleaser/goreleaser-action@v7
+        if: steps.semrel.outputs.version != '' && inputs.goreleaser
+        with:
+          distribution: goreleaser
+          version: ${{ inputs.goreleaser-version }}
+          args: release --clean ${{ !inputs.docker && '--skip=docker' || '' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # infrapi/docs (the portal) and infrapi/.github (the org profile) show each
+  # product's docs and latest release: tell them, with a short-lived token of
+  # the "InfraPI docs" GitHub App (Contents read and write on both). At org
+  # level: the variable DOCS_APP_ID, the secret DOCS_APP_PRIVATE_KEY. Without
+  # it, both still pick changes up in their nightly run.
+  notify-docs:
+    needs: [check, semantic-release]
+    if: >-
+      always() && inputs.notify-docs
+      && needs.check.result == 'success'
+      && needs.semantic-release.result != 'failure'
+      && (github.event_name == 'workflow_dispatch'
+          || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # a release or a manual run always; a push only when docs/ changed
+      - id: changed
+        env:
+          EVENT: ${{ github.event_name }}
+          VERSION: ${{ needs.semantic-release.outputs.version }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          notify=true
+          if [ "$EVENT" = push ] && [ -z "$VERSION" ]; then
+            git diff --quiet "$BEFORE" "$GITHUB_SHA" -- docs/ 2>/dev/null && notify=false
+          fi
+          echo "notify=$notify" >> "$GITHUB_OUTPUT"
+
+      - id: app-token
+        if: steps.changed.outputs.notify == 'true'
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.DOCS_APP_ID }}
+          private-key: ${{ secrets.DOCS_APP_PRIVATE_KEY }}
+          owner: infrapi
+          repositories: docs,.github
+
+      - name: Notify infrapi/docs and infrapi/.github
+        if: steps.changed.outputs.notify == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          for target in docs .github; do
+            gh api "repos/infrapi/$target/dispatches" -f event_type=docs-updated -f "client_payload[repo]=$GITHUB_REPOSITORY"
+            echo "notified infrapi/$target"
+          done
