@@ -12,6 +12,11 @@
 #     GoReleaser adding the files to it, in the same job;
 #   - none: no release, the checks only.
 #
+# With gpg-sign, the release imports the GPG key GPG_PRIVATE_KEY (its
+# passphrase PASSPHRASE) and gives GoReleaser its fingerprint,
+# GPG_FINGERPRINT, for the project's `signs:`: a Terraform provider's
+# SHA256SUMS, signed for the registries.
+#
 #   jobs:
 #     go:
 #       uses: infrapi/ci/.github/workflows/go.yml@v1
@@ -77,6 +82,10 @@ on:
         description: GoReleaser's version
         type: string
         default: "~> v2"
+      gpg-sign:
+        description: the release imports the GPG key GPG_PRIVATE_KEY (PASSPHRASE) and sets GPG_FINGERPRINT, for the .goreleaser.yaml's signs
+        type: boolean
+        default: false
       notify-docs:
         description: "InfraPI's repositories: tell infrapi/docs and infrapi/.github after a release, a push to main changing docs/, or a manual run"
         type: boolean
@@ -90,6 +99,12 @@ on:
         required: false
       REGISTRY_PASSWORD:
         description: the registry's password or token, when it is not ghcr.io
+        required: false
+      GPG_PRIVATE_KEY:
+        description: with gpg-sign, the ASCII-armored private key signing the release
+        required: false
+      PASSPHRASE:
+        description: with gpg-sign, its passphrase
         required: false
       DOCS_APP_PRIVATE_KEY:
         description: with notify-docs, the private key of the GitHub App that may dispatch to infrapi/docs and infrapi/.github
@@ -210,6 +225,14 @@ jobs:
           username: ${{ secrets.REGISTRY_USERNAME || github.actor }}
           password: ${{ secrets.REGISTRY_PASSWORD || secrets.GITHUB_TOKEN }}
 
+      - name: Import the GPG key
+        id: gpg
+        if: inputs.gpg-sign
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.PASSPHRASE }}
+
       - uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
@@ -217,6 +240,7 @@ jobs:
           args: release --clean ${{ !inputs.docker && '--skip=docker' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GPG_FINGERPRINT: ${{ steps.gpg.outputs.fingerprint }}
 
   # release: semantic, on a push to main
   semantic-release:
@@ -279,6 +303,14 @@ jobs:
           username: ${{ secrets.REGISTRY_USERNAME || github.actor }}
           password: ${{ secrets.REGISTRY_PASSWORD || secrets.GITHUB_TOKEN }}
 
+      - name: Import the GPG key
+        id: gpg
+        if: steps.semrel.outputs.version != '' && inputs.goreleaser && inputs.gpg-sign
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.PASSPHRASE }}
+
       # the project's .goreleaser.yaml appends to the release semantic-release
       # made (release.mode: append) and writes no changelog of its own
       - uses: goreleaser/goreleaser-action@v7
@@ -289,6 +321,7 @@ jobs:
           args: release --clean ${{ !inputs.docker && '--skip=docker' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GPG_FINGERPRINT: ${{ steps.gpg.outputs.fingerprint }}
 
   # infrapi/docs (the portal) and infrapi/.github (the org profile) show each
   # product's docs and latest release: tell them, with a short-lived token of

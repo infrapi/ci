@@ -55,12 +55,14 @@ jobs:
 | `docker` | `false` | the release builds and pushes the image too |
 | `registry` | `ghcr.io` | the image's registry |
 | `goreleaser-version` | `~> v2` | |
+| `gpg-sign` | `false` | the release imports the GPG key `GPG_PRIVATE_KEY` and gives GoReleaser its fingerprint, `GPG_FINGERPRINT`, for the `.goreleaser.yaml`'s `signs:` (a Terraform provider's `SHA256SUMS`) |
 | `notify-docs` | `false` | InfraPI's repositories: tell [infrapi/docs](https://github.com/infrapi/docs) and infrapi/.github after a release, a push to `main` changing `docs/`, or a manual run (`workflow_dispatch`) |
 
 | Secret | |
 |---|---|
 | `GOPRIVATE_TOKEN` | a token reading the private modules, with `goprivate` |
 | `REGISTRY_USERNAME`, `REGISTRY_PASSWORD` | the registry's credentials; for ghcr.io, the job's own token |
+| `GPG_PRIVATE_KEY`, `PASSPHRASE` | with `gpg-sign`: the ASCII-armored private key signing the release, and its passphrase |
 | `DOCS_APP_PRIVATE_KEY` | with `notify-docs`: the private key of the "InfraPI docs" GitHub App (Contents read and write on infrapi/docs and infrapi/.github), whose id is the org variable `DOCS_APP_ID` |
 
 | Output | |
