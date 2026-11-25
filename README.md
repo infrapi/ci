@@ -3,7 +3,7 @@
 The CI of a Go project, to import and configure, on GitHub Actions or GitLab
 CI: an API made with
 [`infrapi-cli app init`](https://infrapi.github.io/products/cli/docs/develop/develop-an-api/),
-and InfraPI's own repositories (lib, Kayra, infrapi-cli, tofu-api, ulgen).
+and InfraPI's own repositories (lib, Kayra, infrapi-cli, tofu-api, Ülgen).
 
 - **on a push, a pull or merge request:** gofmt, `go vet`, golangci-lint, gosec,
   `go test -race`, and the build of the binary, if there is one;
