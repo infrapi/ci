@@ -96,7 +96,12 @@ jobs:
     secrets: inherit
 ```
 
-lib's has no `binary`, `goreleaser: false` and no `docker`.
+lib's has no `binary`, `goreleaser: false` and no `docker`, and grants
+`contents: write` only.
+
+The release jobs ask for no permission of their own: they get the caller's.
+Grant `contents: write` for a release, `packages: write` too for an image on
+ghcr.io, nothing with `release: none`.
 
 ## GitLab CI
 
