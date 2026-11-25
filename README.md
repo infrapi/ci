@@ -138,3 +138,8 @@ a project that tags with semantic-release includes its own job for that.
 
 `v1` is a moving tag on the latest `v1.x.y`: a caller on `@v1` gets its fixes, not its
 breaking changes. Pin `@v1.2.3` to stay put.
+
+A push to `main` releases this repository
+([.github/workflows/release.yml](.github/workflows/release.yml)): go-semantic-release
+makes `v<x.y.z>` from the conventional commits (`feat:` a minor, `fix:` a patch,
+`feat!:` a major), then the major tag is moved onto it.

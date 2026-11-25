@@ -1,0 +1,38 @@
+# infrapi/ci's own release: on a push to main, go-semantic-release makes
+# the version v<x.y.z>, its tag and the GitHub release from the
+# conventional commits, then the major tag, v1, is moved onto it: what
+# callers use (infrapi/ci/.github/workflows/go.yml@v1).
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: go-semantic-release/action@v1
+        id: semrel
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # v1 follows the latest v1.x.y; a v2.0.0 starts v2
+      - name: Move the major tag
+        if: steps.semrel.outputs.version != ''
+        env:
+          VERSION: ${{ steps.semrel.outputs.version }}
+        run: |
+          git fetch --tags --force origin
+          major="v${VERSION%%.*}"
+          git tag -f "$major" "v$VERSION"
+          git push -f origin "refs/tags/$major"
+          echo "$major -> v$VERSION"
